@@ -21,7 +21,7 @@ jobs:
       - name: Checkout internal semgrep rules
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          repository: https://github.com/xdenistwn/semgrep-rules.git
+          repository: xdenistwn/semgrep-rules
           ref: v1.0.0
           path: external-rules
  
@@ -36,9 +36,9 @@ jobs:
             --config p/php \
             --config p/security-audit \
             --config p/owasp-top-ten \
-            --config p/laravel \
             --config p/secrets \
             --config external-rules/php/ \
+            --config .semgrep/ \
             --json --output semgrep-results.json
         continue-on-error: true   # jangan langsung gagal, kita atur gate manual di akhir
  
