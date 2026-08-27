@@ -1,0 +1,112 @@
+name: Security Scan - Semgrep Trivy
+
+on:
+  pull_request:
+    branches:
+      - 'release/**'
+ 
+permissions:
+  contents: read
+  pull-requests: write # dibutuhkan agar workflow bisa post comment ke PR
+ 
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5   # v4.3.1
+        with:
+          fetch-depth: 0   # wajib, agar Semgrep bisa hitung merge-base untuk diff-aware scan
+
+      - name: Checkout internal semgrep rules
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: https://github.com/xdenistwn/semgrep-rules.git
+          ref: v1.0.0
+          path: external-rules
+ 
+      - name: Install Semgrep
+        run: pip install semgrep
+ 
+      - name: Run Semgrep scan (hanya file yang berubah di PR)
+        env:
+          SEMGREP_ENABLE_VERSION_CHECK: "0"
+        run: |
+          semgrep ci \
+            --config p/php \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --config p/laravel \
+            --config p/secrets \
+            --config external-rules/php/ \
+            --json --output semgrep-results.json
+        continue-on-error: true   # jangan langsung gagal, kita atur gate manual di akhir
+ 
+      - name: Build Semgrep report (High/Critical only)
+        run: |
+          echo "### Semgrep Scan Result" > semgrep-comment.md
+          echo "" >> semgrep-comment.md
+          jq -r '
+            .results
+            | map(select(.extra.severity == "ERROR" or .extra.severity == "WARNING"))
+            | if length == 0 then
+                "Tidak ditemukan temuan security level High/Critical."
+              else
+                "| Severity | File | Line | Rule | Message |\n|---|---|---|---|---|\n" +
+                (map("| " + .extra.severity + " | " + .path + " | " + (.start.line|tostring) + " | " + .check_id + " | " + (.extra.message | gsub("\n";" ")) + " |") | join("\n")) +
+                "\n\nCatatan: gunakan `semgrep --config <rule_id> --autofix` secara lokal untuk melihat contoh perbaikan otomatis bila rule mendukung autofix."
+              end
+          ' semgrep-results.json >> semgrep-comment.md
+ 
+          echo "SEMGREP_FINDINGS=$(jq '[.results[] | select(.extra.severity=="ERROR" or .extra.severity=="WARNING")] | length' semgrep-results.json)" >> "$GITHUB_ENV"
+ 
+      # ---------------- TRIVY ----------------
+      - name: Run Trivy scan (dependency / composer)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25   # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'json'
+          output: 'trivy-results.json'
+          severity: 'HIGH,CRITICAL'
+          skip-dirs: 'vendor,node_modules'
+          cache: true   # cache vulnerability DB antar run, hindari download ulang tiap PR
+ 
+      - name: Build Trivy report
+        run: |
+          echo "### Trivy Dependency Scan Result" > trivy-comment.md
+          echo "" >> trivy-comment.md
+          jq -r '
+            [.Results[]?.Vulnerabilities[]?]
+            | if length == 0 then
+                "Tidak ditemukan vulnerability dependency level High/Critical."
+              else
+                "| Severity | Package | Installed | Fixed Version | CVE | Title |\n|---|---|---|---|---|---|\n" +
+                (map("| " + .Severity + " | " + .PkgName + " | " + .InstalledVersion + " | " + (.FixedVersion // "-") + " | " + .VulnerabilityID + " | " + (.Title // "-") + " |") | join("\n")) +
+                "\n\nCatatan: kolom `Fixed Version` adalah versi minimum yang perlu diupdate melalui `composer update <package>` untuk menutup CVE terkait."
+              end
+          ' trivy-results.json >> trivy-comment.md
+ 
+          echo "TRIVY_FINDINGS=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-results.json)" >> "$GITHUB_ENV"
+ 
+      # ---------------- COMBINE & COMMENT ----------------
+      - name: Combine reports
+        run: |
+          cat semgrep-comment.md trivy-comment.md > combined-comment.md
+ 
+      - name: Post comment to PR
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9   # v5.0.0
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: combined-comment.md
+          edit-mode: replace
+ 
+      # ---------------- GATE: BLOCK MERGE ----------------
+      - name: Fail job if High/Critical findings exist
+        run: |
+          echo "Semgrep findings: $SEMGREP_FINDINGS"
+          echo "Trivy findings: $TRIVY_FINDINGS"
+          if [ "$SEMGREP_FINDINGS" != "0" ] || [ "$TRIVY_FINDINGS" != "0" ]; then
+            echo "Merge diblokir karena ada temuan High/Critical."
+            exit 1
+          fi
