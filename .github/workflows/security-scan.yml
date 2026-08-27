@@ -1,22 +1,26 @@
-name: Security Scan - Semgrep Trivy
+name: Security Scan - Semgrep Trivy Gitleaks
 
 on:
   pull_request:
     branches:
       - 'release/**'
- 
+
 permissions:
   contents: read
-  pull-requests: write # dibutuhkan agar workflow bisa post comment ke PR
- 
+  pull-requests: write # required so the workflow can post comments on the PR
+
 jobs:
-  security-scan:
+  # ---------------- SEMGREP ----------------
+  semgrep:
+    name: Semgrep Bot
     runs-on: ubuntu-latest
+    outputs:
+      findings: ${{ steps.count.outputs.findings }}
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5   # v4.3.1
         with:
-          fetch-depth: 0   # wajib, agar Semgrep bisa hitung merge-base untuk diff-aware scan
+          fetch-depth: 0   # required so Semgrep can compute the merge-base for a diff-aware scan
 
       - name: Checkout internal semgrep rules
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -24,11 +28,11 @@ jobs:
           repository: xdenistwn/semgrep-rules
           ref: v1.0.0
           path: external-rules
- 
+
       - name: Install Semgrep
         run: pip install semgrep
- 
-      - name: Run Semgrep scan (hanya file yang berubah di PR)
+
+      - name: Run Semgrep scan (only files changed in the PR)
         env:
           SEMGREP_ENABLE_VERSION_CHECK: "0"
         run: |
@@ -40,15 +44,15 @@ jobs:
             --config external-rules/php/ \
             --config .semgrep/ \
             --json --output semgrep-results.json
-        continue-on-error: true   # jangan langsung gagal, kita atur gate manual di akhir
- 
+        continue-on-error: true   # don't fail immediately, the gate at the end handles that manually
+
       - name: Debug Semgrep raw output
         run: |
-          echo "Raw results (sebelum filter severity): $(jq '.results | length' semgrep-results.json)"
+          echo "Raw results (before severity filter): $(jq '.results | length' semgrep-results.json)"
           echo "Files scanned: $(jq '.paths.scanned | length' semgrep-results.json)"
           echo "Errors during analysis:"
           jq -c '.errors[]?' semgrep-results.json
-          echo "Apakah ReportController.php ikut discan:"
+          echo "Was ReportController.php included in the scan:"
           jq -r '.paths.scanned[]? | select(test("ReportController"))' semgrep-results.json
 
       - name: Upload Semgrep raw results
@@ -56,29 +60,49 @@ jobs:
         with:
           name: semgrep-results
           path: semgrep-results.json
-          retention-days: 7
+          retention-days: 2
 
       - name: Build Semgrep report (High/Critical only)
+        id: count
         run: |
-          echo "### Semgrep Scan Result" > semgrep-comment.md
+          echo "### 🔍 Semgrep Bot — Security Scan Result" > semgrep-comment.md
           echo "" >> semgrep-comment.md
           jq -r '
             .results
             | map(select(.extra.severity == "ERROR" or .extra.severity == "WARNING"))
             | if length == 0 then
-                "Tidak ditemukan temuan security level High/Critical."
+                "No High/Critical security findings detected."
               else
                 "| Severity | File | Line | Rule | Message |\n|---|---|---|---|---|\n" +
                 (map("| " + .extra.severity + " | " + .path + " | " + (.start.line|tostring) + " | " + .check_id + " | " + (.extra.message | gsub("\n";" ")) + " |") | join("\n")) +
-                "\n\nCatatan: gunakan `semgrep --config <rule_id> --autofix` secara lokal untuk melihat contoh perbaikan otomatis bila rule mendukung autofix."
+                "\n\nNote: run `semgrep --config <rule_id> --autofix` locally to see an automatic fix suggestion if the rule supports autofix."
               end
           ' semgrep-results.json >> semgrep-comment.md
- 
-          echo "SEMGREP_FINDINGS=$(jq '[.results[] | select(.extra.severity=="ERROR" or .extra.severity=="WARNING")] | length' semgrep-results.json)" >> "$GITHUB_ENV"
- 
-      # ---------------- TRIVY ----------------
-      - name: Run Trivy scan (dependency / composer)
+
+          FINDINGS=$(jq '[.results[] | select(.extra.severity=="ERROR" or .extra.severity=="WARNING")] | length' semgrep-results.json)
+          echo "findings=$FINDINGS" >> "$GITHUB_OUTPUT"
+
+      - name: Post Semgrep comment to PR
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9   # v5.0.0
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: semgrep-comment.md
+          comment-tag: semgrep-scan
+          edit-mode: replace
+
+  # ---------------- TRIVY ----------------
+  trivy:
+    name: Trivy Bot
+    runs-on: ubuntu-latest
+    outputs:
+      findings: ${{ steps.count.outputs.findings }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5   # v4.3.1
+
+      - name: Run Trivy scan (dependencies / composer)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25   # v0.36.0
+        continue-on-error: true   # don't fail immediately, the gate at the end handles that manually
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -86,43 +110,118 @@ jobs:
           output: 'trivy-results.json'
           severity: 'HIGH,CRITICAL'
           skip-dirs: 'vendor,node_modules'
-          cache: true   # cache vulnerability DB antar run, hindari download ulang tiap PR
- 
+          cache: true   # cache the vulnerability DB across runs, avoid re-downloading on every PR
+
+      - name: Upload Trivy raw results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4.6.2
+        with:
+          name: trivy-results
+          path: trivy-results.json
+          retention-days: 2
+
       - name: Build Trivy report
+        id: count
         run: |
-          echo "### Trivy Dependency Scan Result" > trivy-comment.md
+          echo "### 🛡️ Trivy Bot — Dependency Scan Result" > trivy-comment.md
           echo "" >> trivy-comment.md
           jq -r '
             [.Results[]?.Vulnerabilities[]?]
             | if length == 0 then
-                "Tidak ditemukan vulnerability dependency level High/Critical."
+                "No High/Critical dependency vulnerabilities detected."
               else
                 "| Severity | Package | Installed | Fixed Version | CVE | Title |\n|---|---|---|---|---|---|\n" +
                 (map("| " + .Severity + " | " + .PkgName + " | " + .InstalledVersion + " | " + (.FixedVersion // "-") + " | " + .VulnerabilityID + " | " + (.Title // "-") + " |") | join("\n")) +
-                "\n\nCatatan: kolom `Fixed Version` adalah versi minimum yang perlu diupdate melalui `composer update <package>` untuk menutup CVE terkait."
+                "\n\nNote: the `Fixed Version` column is the minimum version to upgrade to via `composer update <package>` to close the related CVE."
               end
           ' trivy-results.json >> trivy-comment.md
- 
-          echo "TRIVY_FINDINGS=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-results.json)" >> "$GITHUB_ENV"
- 
-      # ---------------- COMBINE & COMMENT ----------------
-      - name: Combine reports
-        run: |
-          cat semgrep-comment.md trivy-comment.md > combined-comment.md
- 
-      - name: Post comment to PR
+
+          FINDINGS=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-results.json)
+          echo "findings=$FINDINGS" >> "$GITHUB_OUTPUT"
+
+      - name: Post Trivy comment to PR
         uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9   # v5.0.0
         with:
           issue-number: ${{ github.event.pull_request.number }}
-          body-path: combined-comment.md
+          body-path: trivy-comment.md
+          comment-tag: trivy-scan
           edit-mode: replace
- 
-      # ---------------- GATE: BLOCK MERGE ----------------
+
+  # ---------------- GITLEAKS ----------------
+  gitleaks:
+    name: Gitleaks Bot
+    runs-on: ubuntu-latest
+    outputs:
+      findings: ${{ steps.count.outputs.findings }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5   # v4.3.1
+        with:
+          fetch-depth: 0   # required so Gitleaks can scan the diff between the PR's base and head commits
+
+      - name: Install Gitleaks
+        run: |
+          curl -sSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+
+      - name: Run Gitleaks scan (only commits changed in the PR)
+        run: |
+          gitleaks detect \
+            --source . \
+            --report-format json \
+            --report-path gitleaks-results.json \
+            --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" \
+            --no-banner
+        continue-on-error: true   # don't fail immediately, the gate at the end handles that manually
+
+      - name: Upload Gitleaks raw results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4.6.2
+        with:
+          name: gitleaks-results
+          path: gitleaks-results.json
+          retention-days: 2
+
+      - name: Build Gitleaks report
+        id: count
+        run: |
+          echo "### 🔑 Gitleaks Bot — Secret Scan Result" > gitleaks-comment.md
+          echo "" >> gitleaks-comment.md
+          jq -r '
+            if length == 0 then
+              "No potential leaked secrets/credentials detected."
+            else
+              "| Rule | File | Line | Commit |\n|---|---|---|---|\n" +
+              (map("| " + .RuleID + " | " + .File + " | " + (.StartLine|tostring) + " | " + .Commit[0:7] + " |") | join("\n")) +
+              "\n\n⚠️ The actual secret value is intentionally not shown in this comment for security reasons. Check the commit above, **rotate the affected credential** immediately, then purge it from the git history."
+            end
+          ' gitleaks-results.json >> gitleaks-comment.md
+
+          FINDINGS=$(jq 'length' gitleaks-results.json)
+          echo "findings=$FINDINGS" >> "$GITHUB_OUTPUT"
+
+      - name: Post Gitleaks comment to PR
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9   # v5.0.0
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: gitleaks-comment.md
+          comment-tag: gitleaks-scan
+          edit-mode: replace
+
+  # ---------------- GATE: BLOCK MERGE ----------------
+  gate:
+    name: Security Gate
+    needs: [semgrep, trivy, gitleaks]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
       - name: Fail job if High/Critical findings exist
         run: |
-          echo "Semgrep findings: $SEMGREP_FINDINGS"
-          echo "Trivy findings: $TRIVY_FINDINGS"
-          if [ "$SEMGREP_FINDINGS" != "0" ] || [ "$TRIVY_FINDINGS" != "0" ]; then
-            echo "Merge diblokir karena ada temuan High/Critical."
+          echo "Semgrep findings: ${{ needs.semgrep.outputs.findings }}"
+          echo "Trivy findings: ${{ needs.trivy.outputs.findings }}"
+          echo "Gitleaks findings: ${{ needs.gitleaks.outputs.findings }}"
+          if [ "${{ needs.semgrep.outputs.findings }}" != "0" ] || \
+             [ "${{ needs.trivy.outputs.findings }}" != "0" ] || \
+             [ "${{ needs.gitleaks.outputs.findings }}" != "0" ]; then
+            echo "Merge blocked because High/Critical findings exist."
             exit 1
           fi
