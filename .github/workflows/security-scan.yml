@@ -36,12 +36,28 @@ jobs:
             --config p/php \
             --config p/security-audit \
             --config p/owasp-top-ten \
-            --config p/laravel \
             --config p/secrets \
             --config external-rules/php/ \
+            --config .semgrep/ \
             --json --output semgrep-results.json
         continue-on-error: true   # jangan langsung gagal, kita atur gate manual di akhir
  
+      - name: Debug Semgrep raw output
+        run: |
+          echo "Raw results (sebelum filter severity): $(jq '.results | length' semgrep-results.json)"
+          echo "Files scanned: $(jq '.paths.scanned | length' semgrep-results.json)"
+          echo "Errors during analysis:"
+          jq -c '.errors[]?' semgrep-results.json
+          echo "Apakah ReportController.php ikut discan:"
+          jq -r '.paths.scanned[]? | select(test("ReportController"))' semgrep-results.json
+
+      - name: Upload Semgrep raw results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4.6.2
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+          retention-days: 7
+
       - name: Build Semgrep report (High/Critical only)
         run: |
           echo "### Semgrep Scan Result" > semgrep-comment.md
