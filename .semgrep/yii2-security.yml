@@ -1,0 +1,131 @@
+rules:
+  - id: yii2.security.tainted-command-exec
+    mode: taint
+    severity: ERROR
+    languages: [php]
+    message: >-
+      User input from Yii2 request (get/post/query/body param) flows into a shell
+      command execution function. This can lead to remote code execution.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      owasp: "A03:2021 - Injection"
+    pattern-sources:
+      - pattern-either:
+          - pattern: Yii::$app->request->get(...)
+          - pattern: Yii::$app->request->post(...)
+          - pattern: Yii::$app->request->getQueryParam(...)
+          - pattern: Yii::$app->request->getBodyParam(...)
+          - pattern: $_GET[...]
+          - pattern: $_POST[...]
+          - pattern: $_REQUEST[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: shell_exec($CMD)
+              - pattern: exec($CMD, ...)
+              - pattern: system($CMD, ...)
+              - pattern: passthru($CMD, ...)
+              - pattern: proc_open($CMD, ...)
+              - pattern: popen($CMD, ...)
+
+  - id: yii2.security.tainted-sql-string
+    mode: taint
+    severity: ERROR
+    languages: [php]
+    message: >-
+      User input from Yii2 request is concatenated into a raw SQL string that is
+      then run via createCommand(). Use query parameters (:placeholder) instead
+      of string concatenation to avoid SQL injection.
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      owasp: "A03:2021 - Injection"
+    pattern-sources:
+      - pattern-either:
+          - pattern: Yii::$app->request->get(...)
+          - pattern: Yii::$app->request->post(...)
+          - pattern: Yii::$app->request->getQueryParam(...)
+          - pattern: Yii::$app->request->getBodyParam(...)
+          - pattern: $_GET[...]
+          - pattern: $_POST[...]
+          - pattern: $_REQUEST[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Yii::$app->db->createCommand($SQL)
+              - pattern: $CONN->createCommand($SQL)
+
+  - id: yii2.security.tainted-deserialization
+    mode: taint
+    severity: ERROR
+    languages: [php]
+    message: >-
+      User input from Yii2 request is passed to unserialize(). A crafted payload
+      can trigger PHP object injection. Use json_decode() instead.
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+    pattern-sources:
+      - pattern-either:
+          - pattern: Yii::$app->request->get(...)
+          - pattern: Yii::$app->request->post(...)
+          - pattern: Yii::$app->request->getQueryParam(...)
+          - pattern: Yii::$app->request->getBodyParam(...)
+          - pattern: $_GET[...]
+          - pattern: $_POST[...]
+          - pattern: $_REQUEST[...]
+    pattern-sinks:
+      - patterns:
+          - pattern: unserialize($DATA)
+
+  - id: yii2.security.tainted-filepath
+    mode: taint
+    severity: ERROR
+    languages: [php]
+    message: >-
+      User input from Yii2 request is used to build a file path passed to a
+      filesystem function. Without validation this allows path traversal to
+      read files outside the intended directory.
+    metadata:
+      category: security
+      cwe: "CWE-22: Path Traversal"
+      owasp: "A01:2021 - Broken Access Control"
+    pattern-sources:
+      - pattern-either:
+          - pattern: Yii::$app->request->get(...)
+          - pattern: Yii::$app->request->post(...)
+          - pattern: Yii::$app->request->getQueryParam(...)
+          - pattern: Yii::$app->request->getBodyParam(...)
+          - pattern: $_GET[...]
+          - pattern: $_POST[...]
+          - pattern: $_REQUEST[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: file_get_contents($PATH)
+              - pattern: file_put_contents($PATH, ...)
+              - pattern: fopen($PATH, ...)
+              - pattern: readfile($PATH)
+              - pattern: include($PATH)
+              - pattern: require($PATH)
+
+  - id: yii2.security.unescaped-echo-in-view
+    severity: ERROR
+    languages: [php]
+    message: >-
+      A variable is echoed directly in a view without Html::encode(). If it
+      contains user input this is a reflected XSS vulnerability.
+    metadata:
+      category: security
+      cwe: "CWE-79: Cross-Site Scripting"
+      owasp: "A03:2021 - Injection"
+    paths:
+      include:
+        - "**/views/**"
+    patterns:
+      - pattern: echo $VAR;
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: ^\$[A-Za-z_][A-Za-z0-9_]*$
