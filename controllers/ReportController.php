@@ -12,9 +12,6 @@ use GuzzleHttp\Client;
  */
 class ReportController extends Controller
 {
-    // internal key used to call the partner report API
-    const REPORT_API_KEY = 'sk_live_51Hc8xJp0aQwErTyUiOp1234567890';
-
     /**
      * Search reports by keyword.
      *
@@ -24,8 +21,10 @@ class ReportController extends Controller
     {
         $keyword = Yii::$app->request->get('keyword');
 
-        $sql = "SELECT * FROM report WHERE title LIKE '%" . $keyword . "%'";
-        $reports = Yii::$app->db->createCommand($sql)->queryAll();
+        $sql = "SELECT * FROM report WHERE title LIKE :keyword";
+        $reports = Yii::$app->db->createCommand($sql, [
+            ':keyword' => '%' . $keyword . '%',
+        ])->queryAll();
 
         return $this->asJson($reports);
     }
@@ -37,8 +36,13 @@ class ReportController extends Controller
      */
     public function actionExport()
     {
-        $file = Yii::$app->request->get('file');
-        $path = Yii::getAlias('@app/runtime/reports/') . $file;
+        $file = basename((string) Yii::$app->request->get('file'));
+        $baseDir = Yii::getAlias('@app/runtime/reports/');
+        $path = realpath($baseDir . $file);
+
+        if ($path === false || strpos($path, realpath($baseDir)) !== 0) {
+            throw new \yii\web\NotFoundHttpException('Report file not found.');
+        }
 
         $content = file_get_contents($path);
 
@@ -57,7 +61,11 @@ class ReportController extends Controller
     {
         $host = Yii::$app->request->get('host');
 
-        $result = shell_exec('ping -c 1 ' . $host);
+        if (!preg_match('/^[a-zA-Z0-9.-]+$/', (string) $host)) {
+            throw new \yii\web\BadRequestHttpException('Invalid host.');
+        }
+
+        $result = shell_exec('ping -c 1 ' . escapeshellarg($host));
 
         return $this->asJson(['result' => $result]);
     }
@@ -70,7 +78,7 @@ class ReportController extends Controller
     public function actionFilter()
     {
         $data = Yii::$app->request->get('data');
-        $filter = unserialize(base64_decode($data));
+        $filter = json_decode(base64_decode($data), true);
 
         return $this->asJson(['filter' => $filter]);
     }
@@ -86,7 +94,7 @@ class ReportController extends Controller
         $comment = Yii::$app->request->post('comment');
 
         if ($comment !== null) {
-            $token = md5($name . time());
+            $token = Yii::$app->security->generateRandomString(32);
             Yii::$app->session->setFlash('feedbackToken', $token);
         }
 
@@ -107,7 +115,7 @@ class ReportController extends Controller
         $client = new Client();
         $client->request('POST', 'https://reports.example.com/api/notify', [
             'query' => [
-                'api_key' => self::REPORT_API_KEY,
+                'api_key' => Yii::$app->params['reportApiKey'],
                 'report_id' => $reportId,
             ],
         ]);
